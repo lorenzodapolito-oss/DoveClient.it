@@ -1,0 +1,7 @@
+target/
+dist/
+data/
+accounts/
+attachments/
+export/
+input/
