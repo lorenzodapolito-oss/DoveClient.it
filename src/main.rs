@@ -32,7 +32,11 @@ fn start() -> Result<(), String> {
     let store = account::AccountStore::new(&dirs.accounts, crypto);
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title(format!("{} v{}", app::APP_TITLE, app::APP_VERSION))
+            .with_title(format!(
+                "{} di Lorenzo D'Apolito v{}",
+                app::APP_TITLE,
+                app::APP_VERSION
+            ))
             .with_inner_size([1200.0, 740.0])
             .with_min_inner_size([860.0, 560.0])
             .with_icon(app_icon()),
