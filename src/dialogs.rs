@@ -195,6 +195,8 @@ pub struct Compose {
     pub sending: bool,
     pub error: String,
     pub sender_email: String,
+    pub read_receipt: bool,
+    pub delivery_receipt: bool,
 }
 
 impl Compose {
@@ -211,6 +213,8 @@ impl Compose {
             sending: false,
             error: String::new(),
             sender_email: String::new(),
+            read_receipt: false,
+            delivery_receipt: false,
         }
     }
 
@@ -268,6 +272,8 @@ impl Compose {
             subject: self.subject.trim().to_string(),
             body: self.body.trim_end().to_string(),
             attachments: self.attachments.clone(),
+            read_receipt: self.read_receipt,
+            delivery_receipt: self.delivery_receipt,
         })
     }
 }
@@ -691,6 +697,10 @@ impl App {
                                 .desired_rows(12),
                         );
                     });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut c.read_receipt, "Conferma di lettura");
+                    ui.checkbox(&mut c.delivery_receipt, "Conferma di ricezione");
+                });
                 ui.horizontal(|ui| {
                     if ui.button("Allega file…").clicked() {
                         pick_attach = true;

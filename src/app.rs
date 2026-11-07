@@ -31,6 +31,7 @@ pub enum Msg {
     ExportDone(Result<usize, String>),
 }
 
+#[derive(Clone)]
 pub struct Preview {
     pub full: EmailFull,
     pub atts: Vec<crate::db::AttachmentInfo>,
@@ -60,6 +61,10 @@ pub struct App {
     pub current: Option<i64>,
     anchor: Option<usize>,
     pub preview: Option<Preview>,
+    pub viewers: Vec<(i64, Preview)>,
+    col_from: f32,
+    col_date: f32,
+    col_size: f32,
     pub list_limit: usize,
     pub unread_inbox: usize,
     pub unread: std::collections::HashMap<Option<usize>, usize>,
@@ -162,6 +167,10 @@ impl App {
             selected: BTreeSet::new(),
             current: None,
             anchor: None,
+            viewers: Vec::new(),
+            col_from: 260.0,
+            col_date: 122.0,
+            col_size: 70.0,
             preview: None,
             unread_inbox: 0,
             unread: std::collections::HashMap::new(),
@@ -264,6 +273,116 @@ impl App {
                 total
             },
         );
+    }
+
+    fn open_viewer(&mut self, id: i64) {
+        if self.viewers.iter().any(|(i, _)| *i == id) {
+            return;
+        }
+        let Ok(Some(full)) = self.db.get_email(id) else {
+            return;
+        };
+        let atts = self.db.attachments(id).unwrap_or_default();
+        let text = if !full.body.trim().is_empty() {
+            full.body.clone()
+        } else if !full.html.trim().is_empty() {
+            mime::html_to_text(&full.html)
+        } else {
+            "(nessun contenuto testuale)".into()
+        };
+        if self.viewers.len() >= 8 {
+            self.viewers.remove(0);
+        }
+        self.viewers.push((id, Preview { full, atts, text }));
+    }
+
+    fn viewer_windows(&mut self, ctx: &egui::Context) {
+        let p = self.p();
+        let mut close: Option<i64> = None;
+        let mut save: Option<(i64, String)> = None;
+        for (id, pv) in &self.viewers {
+            let mut open = true;
+            let title = if pv.full.row.subject.trim().is_empty() {
+                "(senza oggetto)".to_string()
+            } else {
+                pv.full.row.subject.clone()
+            };
+            egui::Window::new(title)
+                .id(egui::Id::new(("viewer", *id)))
+                .default_size([720.0, 560.0])
+                .resizable(true)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    let row = &pv.full.row;
+                    egui::Frame::new()
+                        .fill(p.sidebar)
+                        .stroke(egui::Stroke::new(1.0, p.border))
+                        .inner_margin(8.0)
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            egui::Grid::new(("vg", *id)).num_columns(2).show(ui, |ui| {
+                                ui.label(RichText::new("Da:").color(p.text_secondary));
+                                ui.label(&row.from);
+                                ui.end_row();
+                                ui.label(RichText::new("A:").color(p.text_secondary));
+                                ui.label(&row.to);
+                                ui.end_row();
+                                ui.label(RichText::new("Data:").color(p.text_secondary));
+                                ui.label(fmt_date(row.timestamp, &row.date));
+                                ui.end_row();
+                            });
+                            if !pv.atts.is_empty() {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(RichText::new("Allegati:").color(p.text_secondary));
+                                    for a in &pv.atts {
+                                        if ui
+                                            .small_button(format!(
+                                                "{} ({})",
+                                                a.filename,
+                                                human_size(a.size)
+                                            ))
+                                            .clicked()
+                                        {
+                                            save = Some((a.id, a.filename.clone()));
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                    egui::ScrollArea::vertical()
+                        .id_salt(("vs", *id))
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let mut s: &str = &pv.text;
+                            ui.add(
+                                egui::TextEdit::multiline(&mut s)
+                                    .desired_width(f32::INFINITY)
+                                    .frame(egui::Frame::NONE),
+                            );
+                        });
+                });
+            if !open {
+                close = Some(*id);
+            }
+        }
+        if let Some(id) = close {
+            self.viewers.retain(|(i, _)| *i != id);
+        }
+        if let Some((aid, name)) = save {
+            if let Some(path) = rfd::FileDialog::new()
+                .set_directory(&self.dirs.attachments)
+                .set_file_name(name)
+                .save_file()
+            {
+                self.status = match self.db.attachment_data(aid) {
+                    Ok(Some((_, data))) => match std::fs::write(&path, data) {
+                        Ok(()) => format!("Allegato salvato in {}", path.display()),
+                        Err(e) => format!("Errore: {e}"),
+                    },
+                    _ => "Allegato non disponibile".into(),
+                };
+            }
+        }
     }
 
     fn open_message(&mut self, id: i64) {
@@ -816,7 +935,7 @@ impl App {
         let sent_folder = self.folder == 1;
         let row_h = 24.0;
         let icons_w = 104.0;
-        let (date_w, size_w) = (122.0, 70.0);
+        let (date_w, size_w) = (self.col_date, self.col_size);
         // Intestazione a colonne
         let (hrect, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), Sense::hover());
@@ -826,7 +945,7 @@ impl App {
             egui::Stroke::new(1.0, p.border),
         );
         let w = hrect.width();
-        let from_w = (w * 0.26).clamp(120.0, 300.0);
+        let from_w = self.col_from.min((w - 320.0).max(80.0));
         let x_from = hrect.left() + icons_w;
         let x_subj = x_from + from_w;
         let x_date = hrect.right() - date_w - size_w - 8.0;
@@ -885,6 +1004,32 @@ impl App {
                 sort_click = Some(id);
             }
         }
+        let handles = [(x_subj - 5.0, 0usize), (x_date - 5.0, 1), (x_size - 5.0, 2)];
+        for (hx, which) in handles {
+            let r = egui::Rect::from_min_max(
+                egui::pos2(hx - 3.0, hrect.top()),
+                egui::pos2(hx + 3.0, hrect.bottom()),
+            );
+            let resp = ui.interact(r, ui.id().with(("resize", which)), Sense::drag());
+            if resp.hovered() || resp.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(hx, hrect.top() + 3.0),
+                        egui::pos2(hx, hrect.bottom() - 3.0),
+                    ],
+                    egui::Stroke::new(2.0, p.accent),
+                );
+            }
+            let dx = resp.drag_delta().x;
+            if dx != 0.0 {
+                match which {
+                    0 => self.col_from = (self.col_from + dx).clamp(60.0, 600.0),
+                    1 => self.col_date = (self.col_date - dx).clamp(60.0, 300.0),
+                    _ => self.col_size = (self.col_size - dx).clamp(40.0, 200.0),
+                }
+            }
+        }
         if let Some(c) = sort_click {
             if self.sort_col == c {
                 self.sort_asc = !self.sort_asc;
@@ -895,6 +1040,7 @@ impl App {
             self.sort_rows();
         }
         let mut clicked = None;
+        let mut open_full: Option<i64> = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show_rows(ui, row_h, total, |ui, range| {
@@ -947,7 +1093,7 @@ impl App {
                         );
                     }
                     let rw = rect.width();
-                    let from_w = (rw * 0.26).clamp(120.0, 300.0);
+                    let from_w = self.col_from.min((rw - 320.0).max(80.0));
                     let x0 = rect.left() + icons_w;
                     let who = if sent_folder { &e.to } else { &e.from };
                     let clip = egui::Rect::from_min_max(
@@ -988,6 +1134,9 @@ impl App {
                         FontId::proportional(12.5),
                         p.text_muted,
                     );
+                    if resp.double_clicked() {
+                        open_full = Some(e.id);
+                    }
                     if resp.clicked() {
                         clicked = Some((i, ui.input(|s| s.modifiers)));
                     }
@@ -995,6 +1144,9 @@ impl App {
             });
         if let Some((i, m)) = clicked {
             self.click_row(i, m);
+        }
+        if let Some(id) = open_full {
+            self.open_viewer(id);
         }
     }
 
@@ -1323,6 +1475,7 @@ impl eframe::App for App {
             .resizable(true)
             .show(ui, |ui| self.preview_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| self.list(ui));
+        self.viewer_windows(&ctx);
         self.dialogs(&ctx);
     }
 }

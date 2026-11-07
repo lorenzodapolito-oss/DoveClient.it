@@ -2,7 +2,7 @@
 
 use crate::account::Account;
 use crate::providers::app_password_hint;
-use lettre::message::header::ContentType;
+use lettre::message::header::{ContentType, Header, HeaderName, HeaderValue};
 use lettre::message::{Attachment, Mailbox, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::transport::smtp::client::{Tls, TlsParameters};
@@ -19,7 +19,31 @@ pub struct Outgoing {
     pub subject: String,
     pub body: String,
     pub attachments: Vec<PathBuf>,
+    /// Chiede al destinatario la conferma di lettura (Disposition-Notification-To).
+    pub read_receipt: bool,
+    /// Chiede la conferma di ricezione/consegna (Return-Receipt-To).
+    pub delivery_receipt: bool,
 }
+
+macro_rules! raw_header {
+    ($name:ident, $hdr:expr) => {
+        #[derive(Clone, Debug)]
+        struct $name(String);
+        impl Header for $name {
+            fn name() -> HeaderName {
+                HeaderName::new_from_ascii_str($hdr)
+            }
+            fn parse(s: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+                Ok(Self(s.to_string()))
+            }
+            fn display(&self) -> HeaderValue {
+                HeaderValue::new(Self::name(), self.0.clone())
+            }
+        }
+    };
+}
+raw_header!(DispositionNotificationTo, "Disposition-Notification-To");
+raw_header!(ReturnReceiptTo, "Return-Receipt-To");
 
 /// Divide un elenco di destinatari separati da virgola o punto e virgola.
 pub fn split_recipients(s: &str) -> Vec<String> {
@@ -102,6 +126,12 @@ pub fn build_message(acc: &Account, o: &Outgoing) -> Result<Message, String> {
     for c in &o.cc {
         b = b.cc(mailbox(c)?);
     }
+    if o.read_receipt {
+        b = b.header(DispositionNotificationTo(acc.email.clone()));
+    }
+    if o.delivery_receipt {
+        b = b.header(ReturnReceiptTo(acc.email.clone()));
+    }
     let text = SinglePart::plain(o.body.clone());
     if o.attachments.is_empty() {
         return b.singlepart(text).map_err(|e| e.to_string());
@@ -147,6 +177,23 @@ mod tests {
     }
 
     #[test]
+    fn receipts_add_headers() {
+        let mut o = Outgoing {
+            to: vec!["a@x.it".into()],
+            ..Outgoing::default()
+        };
+        let plain =
+            String::from_utf8_lossy(&build_message(&acc(25), &o).unwrap().formatted()).into_owned();
+        assert!(!plain.contains("Disposition-Notification-To"));
+        o.read_receipt = true;
+        o.delivery_receipt = true;
+        let raw =
+            String::from_utf8_lossy(&build_message(&acc(25), &o).unwrap().formatted()).into_owned();
+        assert!(raw.contains("Disposition-Notification-To: io@example.com"));
+        assert!(raw.contains("Return-Receipt-To: io@example.com"));
+    }
+
+    #[test]
     fn recipients_and_addresses() {
         assert_eq!(
             split_recipients("a@x.it; b@x.it , ,c@x.it"),
@@ -167,6 +214,7 @@ mod tests {
             subject: "Prova è".into(),
             body: "Ciao".into(),
             attachments: vec![f.clone()],
+            ..Outgoing::default()
         };
         let m = build_message(&acc(25), &o).unwrap();
         let parsed = crate::mime::parse(&m.formatted()).unwrap();
