@@ -62,6 +62,9 @@ pub struct App {
     pub preview: Option<Preview>,
     pub list_limit: usize,
     pub unread_inbox: usize,
+    pub unread: std::collections::HashMap<Option<usize>, usize>,
+    sort_col: usize,
+    sort_asc: bool,
     pub status: String,
     pub syncing: bool,
     pub sync_cancel: Arc<AtomicBool>,
@@ -161,6 +164,9 @@ impl App {
             anchor: None,
             preview: None,
             unread_inbox: 0,
+            unread: std::collections::HashMap::new(),
+            sort_col: 2,
+            sort_asc: false,
             status: "Pronto".into(),
             syncing: false,
             sync_cancel: Arc::new(AtomicBool::new(false)),
@@ -178,7 +184,7 @@ impl App {
         let _ = crate::templates::ensure_defaults(&app.dirs.templates);
         app.reload();
         if app.accounts.is_empty() {
-            app.status = "Nessun account: apri «Altre, Account» per aggiungerne uno".into();
+            app.status = "Nessun account: apri «Strumenti, Account» per aggiungerne uno".into();
         } else {
             app.refresh(&cc.egui_ctx);
         }
@@ -215,7 +221,10 @@ impl App {
 
     pub fn reload(&mut self) {
         match self.db.query(&self.current_query()) {
-            Ok(rows) => self.emails = rows,
+            Ok(rows) => {
+                self.emails = rows;
+                self.sort_rows();
+            }
             Err(e) => {
                 self.emails.clear();
                 self.status = format!("Errore: {e}");
@@ -236,6 +245,25 @@ impl App {
             ..folder_query(0)
         };
         self.unread_inbox = self.db.count(&q).unwrap_or(0);
+        self.unread.clear();
+        let mut total = 0;
+        for (i, a) in self.accounts.iter().enumerate() {
+            let qa = Query {
+                account: Some(a.email.clone()),
+                ..q.clone()
+            };
+            let n = self.db.count(&qa).unwrap_or(0);
+            total += n;
+            self.unread.insert(Some(i), n);
+        }
+        self.unread.insert(
+            None,
+            if self.accounts.is_empty() {
+                self.unread_inbox
+            } else {
+                total
+            },
+        );
     }
 
     fn open_message(&mut self, id: i64) {
@@ -263,6 +291,15 @@ impl App {
             self.unread_inbox = self
                 .unread_inbox
                 .saturating_sub(usize::from(self.folder == 0));
+            let acc = self
+                .accounts
+                .iter()
+                .position(|a| a.email == full.row.account);
+            for k in [None, acc] {
+                if let Some(n) = self.unread.get_mut(&k) {
+                    *n = n.saturating_sub(1);
+                }
+            }
         }
         self.preview = Some(Preview { full, atts, text });
     }
@@ -545,91 +582,145 @@ impl App {
 
     // ---- disegno ----
 
+    fn menubar(&mut self, ui: &mut egui::Ui) {
+        let p = self.p();
+        let ctx = ui.ctx().clone();
+        let t = |s: &str| RichText::new(s).color(p.toolbar_text);
+        ui.horizontal(|ui| {
+            let w = &mut ui.style_mut().visuals.widgets;
+            w.inactive.weak_bg_fill = Color32::TRANSPARENT;
+            w.inactive.bg_stroke = egui::Stroke::NONE;
+            w.hovered.weak_bg_fill = Color32::from_white_alpha(35);
+            w.active.weak_bg_fill = Color32::from_white_alpha(55);
+            w.open.weak_bg_fill = Color32::from_white_alpha(55);
+            ui.menu_button(t("File"), |ui| {
+                if ui.button("Nuovo messaggio").clicked() {
+                    self.new_mail();
+                    ui.close();
+                }
+                if ui.button("Esporta messaggio").clicked() {
+                    self.export_selected();
+                    ui.close();
+                }
+                if ui.button("Esporta tutti quelli in elenco").clicked() {
+                    self.open_export(false);
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Esci").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+            ui.menu_button(t("Messaggio"), |ui| {
+                if ui.button("Rispondi").clicked() {
+                    self.reply_or_forward(false);
+                    ui.close();
+                }
+                if ui.button("Inoltra").clicked() {
+                    self.reply_or_forward(true);
+                    ui.close();
+                }
+                if ui.button("Preferito sì/no").clicked() {
+                    self.toggle_star();
+                    ui.close();
+                }
+                if ui.button("Elimina").clicked() {
+                    self.ask_delete();
+                    ui.close();
+                }
+                if ui.button("Ripristina dal cestino").clicked() {
+                    self.restore();
+                    ui.close();
+                }
+                if ui.button("Svuota il cestino").clicked() {
+                    self.confirm = Some(Confirm::EmptyTrash);
+                    ui.close();
+                }
+            });
+            ui.menu_button(t("Strumenti"), |ui| {
+                if ui.button("Account").clicked() {
+                    self.show_accounts = true;
+                    ui.close();
+                }
+                if ui.button("Statistiche").clicked() {
+                    self.stats = Some(StatsWin::default());
+                    ui.close();
+                }
+                if ui.button("Registro").clicked() {
+                    self.show_log = true;
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .button(if self.cfg.dark_mode {
+                        "Tema chiaro"
+                    } else {
+                        "Tema scuro"
+                    })
+                    .clicked()
+                {
+                    self.cfg.dark_mode = !self.cfg.dark_mode;
+                    theme::apply(&ctx, self.cfg.dark_mode);
+                    self.save_cfg();
+                    ui.close();
+                }
+            });
+            ui.menu_button(t("Aiuto"), |ui| {
+                ui.label(format!("{APP_TITLE} {APP_VERSION}"));
+                ui.label("Client di posta scritto in Rust");
+            });
+        });
+    }
+
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         let p = self.p();
         let ctx = ui.ctx().clone();
         egui::Frame::new()
             .fill(p.toolbar)
-            .inner_margin(egui::Margin::symmetric(10, 8))
+            .inner_margin(egui::Margin::symmetric(8, 4))
             .show(ui, |ui| {
+                self.menubar(ui);
+                ui.add_space(2.0);
                 ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(APP_TITLE)
-                            .size(19.0)
-                            .strong()
-                            .color(p.toolbar_text),
-                    );
-                    ui.add_space(10.0);
-                    if ui
-                        .add_enabled(!self.syncing, egui::Button::new("Aggiorna"))
-                        .clicked()
-                    {
+                    let has_sel = !self.selected.is_empty();
+                    if icon_button(ui, Icon::Receive, "Ricevi", &p, !self.syncing) {
                         self.refresh(&ctx);
                     }
-                    if ui.button("Nuova").clicked() {
+                    if icon_button(ui, Icon::Compose, "Scrivi", &p, true) {
                         self.new_mail();
                     }
-                    if ui.button("Preferito").clicked() {
+                    ui.add_space(6.0);
+                    if icon_button(ui, Icon::Reply, "Rispondi", &p, self.preview.is_some()) {
+                        self.reply_or_forward(false);
+                    }
+                    if icon_button(ui, Icon::Forward, "Inoltra", &p, self.preview.is_some()) {
+                        self.reply_or_forward(true);
+                    }
+                    ui.add_space(6.0);
+                    if icon_button(ui, Icon::Star, "Preferito", &p, has_sel) {
                         self.toggle_star();
                     }
-                    if ui.button("Elimina").clicked() {
+                    if icon_button(ui, Icon::Delete, "Elimina", &p, has_sel) {
                         self.ask_delete();
                     }
-                    ui.menu_button("Altre", |ui| {
-                        if ui.button("Ripristina dal cestino").clicked() {
-                            self.restore();
-                            ui.close();
-                        }
-                        if ui.button("Esporta messaggio").clicked() {
-                            self.export_selected();
-                            ui.close();
-                        }
-                        if ui.button("Esporta tutti quelli in elenco").clicked() {
-                            self.open_export(false);
-                            ui.close();
-                        }
-                        if ui.button("Svuota il cestino").clicked() {
-                            self.confirm = Some(Confirm::EmptyTrash);
-                            ui.close();
-                        }
-                        ui.separator();
-                        if ui.button("Statistiche").clicked() {
-                            self.stats = Some(StatsWin::default());
-                            ui.close();
-                        }
-                        if ui.button("Account").clicked() {
-                            self.show_accounts = true;
-                            ui.close();
-                        }
-                        if ui.button("Registro").clicked() {
-                            self.show_log = true;
-                            ui.close();
-                        }
-                        ui.separator();
-                        if ui
-                            .button(if self.cfg.dark_mode {
-                                "Tema chiaro"
-                            } else {
-                                "Tema scuro"
-                            })
-                            .clicked()
-                        {
-                            self.cfg.dark_mode = !self.cfg.dark_mode;
-                            theme::apply(&ctx, self.cfg.dark_mode);
-                            self.save_cfg();
-                            ui.close();
-                        }
-                    });
+                    if self.folder == TRASH
+                        && icon_button(ui, Icon::Restore, "Ripristina", &p, has_sel)
+                    {
+                        self.restore();
+                    }
+                    ui.add_space(6.0);
+                    if icon_button(ui, Icon::Accounts, "Account", &p, true) {
+                        self.show_accounts = true;
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let r = ui.add(
                             egui::TextEdit::singleline(&mut self.search)
                                 .desired_width(220.0)
-                                .hint_text("Cerca…"),
+                                .hint_text("Cerca nei messaggi…"),
                         );
                         if r.changed() {
                             self.search_changed = Some(Instant::now());
                         }
-                        ui.label(RichText::new("Cerca").color(p.toolbar_sub));
                     });
                 });
             });
@@ -637,72 +728,172 @@ impl App {
 
     fn side(&mut self, ui: &mut egui::Ui) {
         let p = self.p();
-        ui.add_space(8.0);
-        ui.label(RichText::new("CARTELLE").strong().color(p.text_secondary));
-        ui.add_space(4.0);
-        let mut new_folder = None;
-        for (i, name) in FOLDERS.iter().enumerate() {
-            let label = if i == 0 && self.unread_inbox > 0 {
-                format!("{name}  ({})", self.unread_inbox)
-            } else {
-                (*name).to_string()
-            };
-            if ui.selectable_label(self.folder == i, label).clicked() {
-                new_folder = Some(i);
-            }
+        ui.add_space(6.0);
+        let mut nodes: Vec<(Option<usize>, String)> = Vec::new();
+        if self.accounts.len() != 1 {
+            nodes.push((
+                None,
+                if self.accounts.is_empty() {
+                    "Cartelle locali".into()
+                } else {
+                    "Tutti gli account".into()
+                },
+            ));
         }
-        ui.add_space(14.0);
-        ui.label(RichText::new("ACCOUNT").strong().color(p.text_secondary));
-        ui.add_space(4.0);
-        let mut new_acc = None;
-        if ui
-            .selectable_label(self.account_sel.is_none(), "Tutti gli account")
-            .clicked()
-        {
-            new_acc = Some(None);
-        }
-        for (i, a) in self.accounts.iter().enumerate() {
-            if ui
-                .selectable_label(self.account_sel == Some(i), &a.email)
-                .clicked()
-            {
-                new_acc = Some(Some(i));
-            }
-        }
-        if let Some(f) = new_folder {
+        nodes.extend(
+            self.accounts
+                .iter()
+                .enumerate()
+                .map(|(i, a)| (Some(i), a.email.clone())),
+        );
+        let mut pick: Option<(Option<usize>, usize)> = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (acc, name) in &nodes {
+                    let id = acc.map_or(usize::MAX, |i| i);
+                    let unread = self.unread.get(acc).copied().unwrap_or(0);
+                    let title = RichText::new(name).strong().color(if unread > 0 {
+                        p.unread
+                    } else {
+                        p.text
+                    });
+                    egui::CollapsingHeader::new(title)
+                        .id_salt(("tree", id))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            for (j, f) in FOLDERS.iter().enumerate() {
+                                let mut label = (*f).to_string();
+                                if j == 0 && unread > 0 {
+                                    label = format!("{f} ({unread})");
+                                }
+                                let sel = self.account_sel == *acc && self.folder == j;
+                                let text = RichText::new(label).color(if j == 0 && unread > 0 {
+                                    p.unread
+                                } else {
+                                    p.text
+                                });
+                                if ui.selectable_label(sel, text).clicked() {
+                                    pick = Some((*acc, j));
+                                }
+                            }
+                        });
+                }
+            });
+        if let Some((a, f)) = pick {
+            self.account_sel = a;
             self.folder = f;
             self.selected.clear();
             self.current = None;
             self.preview = None;
             self.reload();
         }
-        if let Some(a) = new_acc {
-            self.account_sel = a;
-            self.reload();
-        }
+    }
+
+    fn sort_rows(&mut self) {
+        let (col, asc) = (self.sort_col, self.sort_asc);
+        let sent = self.folder == 1;
+        self.emails.sort_by(|a, b| {
+            let o = match col {
+                0 => (if sent { &a.to } else { &a.from })
+                    .to_lowercase()
+                    .cmp(&(if sent { &b.to } else { &b.from }).to_lowercase()),
+                1 => a.subject.to_lowercase().cmp(&b.subject.to_lowercase()),
+                3 => a.size.cmp(&b.size),
+                _ => a.timestamp.cmp(&b.timestamp),
+            };
+            if asc {
+                o
+            } else {
+                o.reverse()
+            }
+        });
     }
 
     fn list(&mut self, ui: &mut egui::Ui) {
         let p = self.p();
         let total = self.emails.len();
-        let unread = self.emails.iter().filter(|e| !e.is_read).count();
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(FOLDERS.get(self.folder).copied().unwrap_or(""))
-                    .strong()
-                    .size(16.0),
-            );
-            ui.label(
-                RichText::new(format!("{total} messaggi ({unread} non letti)"))
-                    .color(p.text_secondary),
-            );
-            if total >= self.list_limit && ui.button("Carica altri").clicked() {
-                self.list_limit += 200;
-                self.reload();
-            }
-        });
-        let row_h = 24.0;
         let sent_folder = self.folder == 1;
+        let row_h = 24.0;
+        let icons_w = 104.0;
+        let (date_w, size_w) = (122.0, 70.0);
+        // Intestazione a colonne
+        let (hrect, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), Sense::hover());
+        ui.painter().rect_filled(hrect, 0.0, p.accent_light);
+        ui.painter().line_segment(
+            [hrect.left_bottom(), hrect.right_bottom()],
+            egui::Stroke::new(1.0, p.border),
+        );
+        let w = hrect.width();
+        let from_w = (w * 0.26).clamp(120.0, 300.0);
+        let x_from = hrect.left() + icons_w;
+        let x_subj = x_from + from_w;
+        let x_date = hrect.right() - date_w - size_w - 8.0;
+        let x_size = hrect.right() - size_w - 8.0;
+        let cols = [
+            (
+                0usize,
+                x_from,
+                x_subj - 4.0,
+                if sent_folder { "A" } else { "Da" },
+            ),
+            (1, x_subj, x_date - 4.0, "Oggetto"),
+            (2, x_date, x_size - 4.0, "Data"),
+            (3, x_size, hrect.right() - 4.0, "Dim."),
+        ];
+        let mut sort_click = None;
+        for (id, x0, x1, label) in cols {
+            let r = egui::Rect::from_min_max(
+                egui::pos2(x0 - 4.0, hrect.top()),
+                egui::pos2(x1, hrect.bottom()),
+            );
+            let resp = ui.interact(r, ui.id().with(("hdr", id)), Sense::click());
+            if resp.hovered() {
+                ui.painter().rect_filled(r, 0.0, p.selected);
+            }
+            ui.painter().text(
+                egui::pos2(x0, hrect.center().y),
+                Align2::LEFT_CENTER,
+                label,
+                FontId::proportional(13.0),
+                p.text,
+            );
+            if self.sort_col == id {
+                let c = egui::pos2(x0 + 14.0 + label.len() as f32 * 7.0, hrect.center().y);
+                let up = self.sort_asc;
+                let pts = if up {
+                    vec![
+                        c + egui::vec2(-4.0, 3.0),
+                        c + egui::vec2(4.0, 3.0),
+                        c + egui::vec2(0.0, -3.0),
+                    ]
+                } else {
+                    vec![
+                        c + egui::vec2(-4.0, -3.0),
+                        c + egui::vec2(4.0, -3.0),
+                        c + egui::vec2(0.0, 3.0),
+                    ]
+                };
+                ui.painter().add(egui::Shape::convex_polygon(
+                    pts,
+                    p.text_secondary,
+                    egui::Stroke::NONE,
+                ));
+            }
+            if resp.clicked() {
+                sort_click = Some(id);
+            }
+        }
+        if let Some(c) = sort_click {
+            if self.sort_col == c {
+                self.sort_asc = !self.sort_asc;
+            } else {
+                self.sort_col = c;
+                self.sort_asc = c != 2 && c != 3;
+            }
+            self.sort_rows();
+        }
         let mut clicked = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -725,47 +916,56 @@ impl App {
                     } else {
                         p.list_bg
                     };
-                    ui.painter().rect_filled(rect, 3.0, bg);
+                    ui.painter().rect_filled(rect, 0.0, bg);
                     let col = if e.is_read { p.text_secondary } else { p.text };
                     let font = FontId::proportional(14.0);
                     let mid = rect.left_center();
-                    if !e.is_read {
-                        ui.painter()
-                            .circle_filled(egui::pos2(mid.x + 9.0, mid.y), 4.0, p.unread);
-                    }
+                    draw_envelope(
+                        ui.painter(),
+                        egui::pos2(mid.x + 14.0, mid.y),
+                        6.0,
+                        if e.is_read { p.text_muted } else { p.unread },
+                        !e.is_read,
+                    );
                     if e.is_starred {
-                        draw_star(ui, egui::pos2(mid.x + 26.0, mid.y), 6.5, p.star);
+                        draw_star(ui, egui::pos2(mid.x + 36.0, mid.y), 6.5, p.star);
                     }
-                    let mut x = rect.left() + 40.0;
+                    if e.has_attachments {
+                        draw_clip(
+                            ui.painter(),
+                            egui::pos2(mid.x + 56.0, mid.y),
+                            p.text_secondary,
+                        );
+                    }
                     if e.is_pec {
                         ui.painter().text(
-                            egui::pos2(x, mid.y),
+                            egui::pos2(mid.x + 70.0, mid.y),
                             Align2::LEFT_CENTER,
                             "PEC",
                             FontId::proportional(11.0),
                             p.pec,
                         );
-                        x += 30.0;
                     }
-                    let w = rect.width();
-                    let from_w = (w * 0.26).clamp(120.0, 300.0);
+                    let rw = rect.width();
+                    let from_w = (rw * 0.26).clamp(120.0, 300.0);
+                    let x0 = rect.left() + icons_w;
                     let who = if sent_folder { &e.to } else { &e.from };
                     let clip = egui::Rect::from_min_max(
-                        egui::pos2(x, rect.top()),
-                        egui::pos2(x + from_w - 8.0, rect.bottom()),
+                        egui::pos2(x0, rect.top()),
+                        egui::pos2(x0 + from_w - 8.0, rect.bottom()),
                     );
                     ui.painter().with_clip_rect(clip).text(
-                        egui::pos2(x, mid.y),
+                        egui::pos2(x0, mid.y),
                         Align2::LEFT_CENTER,
                         who,
                         font.clone(),
                         col,
                     );
-                    let date_w = 118.0;
-                    let sx = x + from_w;
+                    let sx = x0 + from_w;
+                    let dx = rect.right() - date_w - size_w - 8.0;
                     let clip = egui::Rect::from_min_max(
                         egui::pos2(sx, rect.top()),
-                        egui::pos2(rect.right() - date_w - 8.0, rect.bottom()),
+                        egui::pos2(dx - 4.0, rect.bottom()),
                     );
                     ui.painter().with_clip_rect(clip).text(
                         egui::pos2(sx, mid.y),
@@ -775,9 +975,16 @@ impl App {
                         col,
                     );
                     ui.painter().text(
+                        egui::pos2(dx, mid.y),
+                        Align2::LEFT_CENTER,
+                        fmt_date(e.timestamp, &e.date),
+                        FontId::proportional(12.5),
+                        p.text_muted,
+                    );
+                    ui.painter().text(
                         egui::pos2(rect.right() - 8.0, mid.y),
                         Align2::RIGHT_CENTER,
-                        fmt_date(e.timestamp, &e.date),
+                        human_size(e.size),
                         FontId::proportional(12.5),
                         p.text_muted,
                     );
@@ -800,37 +1007,46 @@ impl App {
         };
         let row = pv.full.row.clone();
         let atts = pv.atts.clone();
-        let mut action = None;
-        ui.add_space(4.0);
-        ui.label(RichText::new(&row.subject).strong().size(17.0));
-        ui.label(RichText::new(format!("Da: {}", row.from)).color(p.text_secondary));
-        ui.label(
-            RichText::new(format!(
-                "A: {}    {}",
-                row.to,
-                fmt_date(row.timestamp, &row.date)
-            ))
-            .color(p.text_muted),
-        );
-        ui.horizontal(|ui| {
-            if ui.button("Rispondi").clicked() {
-                action = Some(0);
-            }
-            if ui.button("Inoltra").clicked() {
-                action = Some(1);
-            }
-            if !atts.is_empty() && ui.button("Salva allegati").clicked() {
-                action = Some(2);
-            }
-        });
-        if !atts.is_empty() {
-            let names: Vec<String> = atts
-                .iter()
-                .map(|a| format!("{} ({})", a.filename, human_size(a.size)))
-                .collect();
-            ui.label(RichText::new(format!("Allegati: {}", names.join(", "))).color(p.accent));
-        }
-        ui.separator();
+        let mut save: Option<usize> = None;
+        let mut save_all = false;
+        egui::Frame::new()
+            .fill(p.sidebar)
+            .stroke(egui::Stroke::new(1.0, p.border))
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new(&row.subject).strong().size(16.0));
+                egui::Grid::new("hdr_grid")
+                    .num_columns(2)
+                    .spacing([10.0, 2.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Da:").color(p.text_secondary));
+                        ui.label(&row.from);
+                        ui.end_row();
+                        ui.label(RichText::new("A:").color(p.text_secondary));
+                        ui.label(&row.to);
+                        ui.end_row();
+                        ui.label(RichText::new("Data:").color(p.text_secondary));
+                        ui.label(fmt_date(row.timestamp, &row.date));
+                        ui.end_row();
+                    });
+                if !atts.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Allegati:").color(p.text_secondary));
+                        for (i, a) in atts.iter().enumerate() {
+                            if ui
+                                .small_button(format!("{} ({})", a.filename, human_size(a.size)))
+                                .clicked()
+                            {
+                                save = Some(i);
+                            }
+                        }
+                        if atts.len() > 1 && ui.small_button("Salva tutti").clicked() {
+                            save_all = true;
+                        }
+                    });
+                }
+            });
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -843,11 +1059,178 @@ impl App {
                     );
                 }
             });
-        match action {
-            Some(0) => self.reply_or_forward(false),
-            Some(1) => self.reply_or_forward(true),
-            Some(2) => self.save_attachments(),
-            _ => {}
+        if let Some(i) = save {
+            if let Some(a) = atts.get(i) {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_directory(&self.dirs.attachments)
+                    .set_file_name(a.filename.clone())
+                    .save_file()
+                {
+                    self.status = match self.db.attachment_data(a.id) {
+                        Ok(Some((_, data))) => match std::fs::write(&path, data) {
+                            Ok(()) => format!("Allegato salvato in {}", path.display()),
+                            Err(e) => format!("Errore: {e}"),
+                        },
+                        _ => "Allegato non disponibile".into(),
+                    };
+                }
+            }
+        }
+        if save_all {
+            self.save_attachments();
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Icon {
+    Receive,
+    Compose,
+    Reply,
+    Forward,
+    Delete,
+    Star,
+    Accounts,
+    Restore,
+}
+
+fn icon_button(ui: &mut egui::Ui, icon: Icon, label: &str, p: &Palette, enabled: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(66.0, 56.0),
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    if enabled && resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, 6.0, Color32::from_white_alpha(30));
+    }
+    let col = if enabled {
+        p.toolbar_text
+    } else {
+        p.toolbar_sub.gamma_multiply(0.45)
+    };
+    draw_icon(
+        ui.painter(),
+        icon,
+        egui::pos2(rect.center().x, rect.top() + 21.0),
+        col,
+        enabled,
+    );
+    ui.painter().text(
+        egui::pos2(rect.center().x, rect.bottom() - 9.0),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(12.5),
+        col,
+    );
+    enabled && resp.clicked()
+}
+
+fn draw_envelope(painter: &egui::Painter, c: egui::Pos2, r: f32, color: Color32, filled: bool) {
+    let rect = egui::Rect::from_center_size(c, egui::vec2(r * 2.0, r * 1.45));
+    let st = egui::Stroke::new(1.3, color);
+    if filled {
+        painter.rect_filled(rect, 1.5, color);
+        painter.line_segment(
+            [rect.left_top(), c + egui::vec2(0.0, 1.0)],
+            egui::Stroke::new(1.2, Color32::from_black_alpha(90)),
+        );
+        painter.line_segment(
+            [rect.right_top(), c + egui::vec2(0.0, 1.0)],
+            egui::Stroke::new(1.2, Color32::from_black_alpha(90)),
+        );
+    } else {
+        painter.rect_stroke(rect, 1.5, st, egui::StrokeKind::Inside);
+        painter.line_segment([rect.left_top(), c + egui::vec2(0.0, 1.0)], st);
+        painter.line_segment([rect.right_top(), c + egui::vec2(0.0, 1.0)], st);
+    }
+}
+
+fn draw_clip(painter: &egui::Painter, c: egui::Pos2, color: Color32) {
+    let st = egui::Stroke::new(1.3, color);
+    let r = egui::Rect::from_center_size(c, egui::vec2(6.0, 12.0));
+    painter.rect_stroke(r, 3.0, st, egui::StrokeKind::Inside);
+    painter.line_segment([c + egui::vec2(0.0, -3.0), c + egui::vec2(0.0, 4.0)], st);
+}
+
+fn arrow_head(painter: &egui::Painter, tip: egui::Pos2, dir: egui::Vec2, color: Color32) {
+    let n = egui::vec2(-dir.y, dir.x);
+    let pts = vec![tip, tip - dir * 6.0 + n * 4.5, tip - dir * 6.0 - n * 4.5];
+    painter.add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
+}
+
+fn draw_icon(painter: &egui::Painter, icon: Icon, c: egui::Pos2, color: Color32, enabled: bool) {
+    let st = egui::Stroke::new(1.8, color);
+    let gold = if enabled {
+        Color32::from_rgb(255, 205, 70)
+    } else {
+        color
+    };
+    let v = |x: f32, y: f32| c + egui::vec2(x, y);
+    match icon {
+        Icon::Receive => {
+            draw_envelope(painter, v(0.0, 2.0), 11.0, color, false);
+            painter.line_segment([v(8.0, -12.0), v(8.0, -3.0)], egui::Stroke::new(2.4, gold));
+            arrow_head(painter, v(8.0, 0.0), egui::vec2(0.0, 1.0), gold);
+        }
+        Icon::Compose => {
+            let r = egui::Rect::from_center_size(v(-2.0, 1.0), egui::vec2(18.0, 22.0));
+            painter.rect_stroke(r, 2.0, st, egui::StrokeKind::Inside);
+            for y in [-4.0, 1.0, 6.0] {
+                painter.line_segment([v(-8.0, y), v(3.0, y)], egui::Stroke::new(1.2, color));
+            }
+            painter.line_segment([v(11.0, -11.0), v(1.0, 5.0)], egui::Stroke::new(3.0, gold));
+        }
+        Icon::Reply => {
+            painter.line_segment([v(10.0, 8.0), v(10.0, -2.0)], st);
+            painter.line_segment([v(10.0, -2.0), v(-3.0, -2.0)], st);
+            arrow_head(painter, v(-11.0, -2.0), egui::vec2(-1.0, 0.0), gold);
+        }
+        Icon::Forward => {
+            painter.line_segment([v(-10.0, 8.0), v(-10.0, -2.0)], st);
+            painter.line_segment([v(-10.0, -2.0), v(3.0, -2.0)], st);
+            arrow_head(painter, v(11.0, -2.0), egui::vec2(1.0, 0.0), gold);
+        }
+        Icon::Delete => {
+            painter.line_segment([v(-10.0, -8.0), v(10.0, -8.0)], st);
+            painter.line_segment([v(-3.0, -8.0), v(-3.0, -11.0)], st);
+            painter.line_segment([v(3.0, -8.0), v(3.0, -11.0)], st);
+            painter.line_segment([v(-3.0, -11.0), v(3.0, -11.0)], st);
+            let pts = vec![v(-8.0, -6.0), v(8.0, -6.0), v(6.0, 11.0), v(-6.0, 11.0)];
+            painter.add(egui::Shape::closed_line(pts, st));
+            for x in [-2.5, 2.5] {
+                painter.line_segment([v(x, -2.0), v(x, 7.0)], egui::Stroke::new(1.3, color));
+            }
+        }
+        Icon::Star => {
+            let pts: Vec<egui::Pos2> = (0..10)
+                .map(|i| {
+                    let a = std::f32::consts::PI * (i as f32) / 5.0 - std::f32::consts::FRAC_PI_2;
+                    let rad = if i % 2 == 0 { 12.0 } else { 5.4 };
+                    v(rad * a.cos(), rad * a.sin() + 1.0)
+                })
+                .collect();
+            painter.add(egui::Shape::convex_polygon(pts, gold, egui::Stroke::NONE));
+        }
+        Icon::Accounts => {
+            painter.circle_stroke(v(0.0, -5.0), 5.5, st);
+            let arc: Vec<egui::Pos2> = (0..=10)
+                .map(|i| {
+                    let a = std::f32::consts::PI * (i as f32) / 10.0;
+                    v(-11.0 * a.cos(), 12.0 - 11.0 * a.sin())
+                })
+                .collect();
+            painter.add(egui::Shape::line(arc, st));
+        }
+        Icon::Restore => {
+            painter.line_segment([v(0.0, 10.0), v(0.0, -4.0)], st);
+            arrow_head(painter, v(0.0, -11.0), egui::vec2(0.0, -1.0), gold);
+            painter.line_segment([v(-10.0, 4.0), v(-10.0, 11.0)], st);
+            painter.line_segment([v(10.0, 4.0), v(10.0, 11.0)], st);
+            painter.line_segment([v(-10.0, 11.0), v(10.0, 11.0)], st);
         }
     }
 }
@@ -910,13 +1293,23 @@ impl eframe::App for App {
             .show(ui, |ui| self.toolbar(ui));
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
-                if self.syncing {
-                    ui.spinner();
-                    if ui.small_button("Interrompi").clicked() {
-                        self.sync_cancel.store(true, Ordering::Relaxed);
+                ui.label(
+                    RichText::new(format!(
+                        "{} messaggi, {} non letti",
+                        self.emails.len(),
+                        self.unread_inbox
+                    ))
+                    .color(self.p().text_secondary),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.syncing {
+                        if ui.small_button("Interrompi").clicked() {
+                            self.sync_cancel.store(true, Ordering::Relaxed);
+                        }
+                        ui.spinner();
                     }
-                }
-                ui.label(RichText::new(&self.status).color(self.p().text_secondary));
+                    ui.label(RichText::new(&self.status).color(self.p().text_secondary));
+                });
             });
         });
         egui::Panel::left("side")

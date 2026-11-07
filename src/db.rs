@@ -26,6 +26,8 @@ pub struct EmailRow {
     pub is_deleted: bool,
     pub is_starred: bool,
     pub is_pec: bool,
+    /// Dimensione del messaggio in byte.
+    pub size: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -84,7 +86,7 @@ pub fn fts_query(text: &str) -> Option<String> {
     }
 }
 
-const COLS: &str = "e.id, e.account, e.folder, e.from_addr, e.to_addr, e.subject, e.date, e.date_timestamp, e.has_attachments, e.is_read, e.is_deleted, e.is_starred, e.is_pec";
+const COLS: &str = "e.id, e.account, e.folder, e.from_addr, e.to_addr, e.subject, e.date, e.date_timestamp, e.has_attachments, e.is_read, e.is_deleted, e.is_starred, e.is_pec, length(e.raw)";
 
 fn row_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<EmailRow> {
     Ok(EmailRow {
@@ -101,6 +103,7 @@ fn row_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<EmailRow> {
         is_deleted: r.get::<_, i64>(10)? != 0,
         is_starred: r.get::<_, i64>(11)? != 0,
         is_pec: r.get::<_, i64>(12)? != 0,
+        size: usize::try_from(r.get::<_, Option<i64>>(13)?.unwrap_or(0)).unwrap_or(0),
     })
 }
 
@@ -388,8 +391,8 @@ impl Db {
                 |r| {
                     Ok(EmailFull {
                         row: row_of(r)?,
-                        body: r.get::<_, Option<String>>(13)?.unwrap_or_default(),
-                        html: r.get::<_, Option<String>>(14)?.unwrap_or_default(),
+                        body: r.get::<_, Option<String>>(14)?.unwrap_or_default(),
+                        html: r.get::<_, Option<String>>(15)?.unwrap_or_default(),
                     })
                 },
             )
