@@ -30,7 +30,7 @@ const fn c(r: u8, g: u8, b: u8) -> Color32 {
 
 pub const LIGHT: Palette = Palette {
     toolbar: c(0x0B, 0x5C, 0x8C),
-    toolbar_text: c(0xEA, 0xF6, 0xFD),
+    toolbar_text: c(0xD2, 0xEE, 0xFC),
     toolbar_sub: c(0xBE, 0xE3, 0xF5),
     window_bg: c(0xE4, 0xF4, 0xFC),
     sidebar: c(0xD3, 0xEC, 0xF9),
@@ -78,7 +78,7 @@ pub fn palette(dark: bool) -> Palette {
     }
 }
 
-pub fn apply(ctx: &egui::Context, dark: bool) {
+pub fn visuals(dark: bool) -> egui::Visuals {
     let p = palette(dark);
     let mut v = if dark {
         egui::Visuals::dark()
@@ -116,11 +116,92 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
     v.widgets.active.weak_bg_fill = p.accent;
     v.widgets.open.bg_fill = p.accent_light;
     v.widgets.open.weak_bg_fill = p.accent_light;
-    ctx.set_visuals(v);
+    colorize(&mut v, c(0xB6, 0xE4, 0xF7), c(0x08, 0x3A, 0x57));
+    v
+}
+
+pub fn apply(ctx: &egui::Context, dark: bool) {
+    let v = visuals(dark);
+    // Il tema è sempre quello scelto nel programma, non quello di Windows.
+    ctx.set_theme(if dark {
+        egui::ThemePreference::Dark
+    } else {
+        egui::ThemePreference::Light
+    });
+    ctx.set_visuals_of(egui::Theme::Light, v.clone());
+    ctx.set_visuals_of(egui::Theme::Dark, v);
     ctx.global_style_mut(|s| {
         s.spacing.item_spacing = egui::vec2(8.0, 6.0);
         s.spacing.button_padding = egui::vec2(10.0, 5.0);
     });
+}
+
+/// Bianco e grigio non devono esistere: ogni colore neutro (anche quelli che egui mette di
+/// default, come il testo dei pulsanti, le ombre o i bordi) prende una tinta.
+/// I chiari vanno verso `light`, gli scuri verso `dark`.
+pub fn colorize(v: &mut egui::Visuals, light: Color32, dark: Color32) {
+    fn fix(c: &mut Color32, light: Color32, dark: Color32) {
+        if !is_neutral(*c) {
+            return;
+        }
+        let [r, g, b, a] = c.to_srgba_unmultiplied();
+        let lum = (u32::from(r) * 3 + u32::from(g) * 6 + u32::from(b)) / 10;
+        let (tone, t) = if lum >= 128 {
+            (light, 0.85)
+        } else {
+            (dark, 0.9)
+        };
+        let mix = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
+        let [tr, tg, tb, _] = tone.to_srgba_unmultiplied();
+        *c = Color32::from_rgba_unmultiplied(mix(r, tr), mix(g, tg), mix(b, tb), a);
+    }
+    for c in [
+        &mut v.panel_fill,
+        &mut v.window_fill,
+        &mut v.extreme_bg_color,
+        &mut v.faint_bg_color,
+        &mut v.code_bg_color,
+        &mut v.window_stroke.color,
+        &mut v.window_shadow.color,
+        &mut v.popup_shadow.color,
+        &mut v.selection.bg_fill,
+        &mut v.selection.stroke.color,
+        &mut v.hyperlink_color,
+        &mut v.text_cursor.stroke.color,
+        &mut v.warn_fg_color,
+        &mut v.error_fg_color,
+    ] {
+        fix(c, light, dark);
+    }
+    for c in [
+        &mut v.override_text_color,
+        &mut v.weak_text_color,
+        &mut v.text_edit_bg_color,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        fix(c, light, dark);
+    }
+    for w in [
+        &mut v.widgets.noninteractive,
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+        &mut v.widgets.open,
+    ] {
+        fix(&mut w.bg_fill, light, dark);
+        fix(&mut w.weak_bg_fill, light, dark);
+        fix(&mut w.bg_stroke.color, light, dark);
+        fix(&mut w.fg_stroke.color, light, dark);
+    }
+}
+
+/// Neutro = bianco, grigio o quasi (i canali RGB differiscono di meno di 24).
+pub fn is_neutral(c: Color32) -> bool {
+    let [r, g, b, a] = c.to_srgba_unmultiplied().map(i32::from);
+    // Un colore del tutto trasparente non si vede: non è né bianco né grigio.
+    a > 0 && r.max(g).max(b) - r.min(g).min(b) < 24
 }
 
 #[cfg(test)]
@@ -128,11 +209,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn no_white_or_gray_anywhere_in_the_visuals() {
+        for dark in [false, true] {
+            let v = visuals(dark);
+            let mut named: Vec<(&str, Color32)> = vec![
+                ("panel", v.panel_fill),
+                ("window", v.window_fill),
+                ("faint", v.faint_bg_color),
+                ("extreme", v.extreme_bg_color),
+                ("code", v.code_bg_color),
+                ("window_stroke", v.window_stroke.color),
+                ("window_shadow", v.window_shadow.color),
+                ("popup_shadow", v.popup_shadow.color),
+                ("selection", v.selection.bg_fill),
+                ("selection_stroke", v.selection.stroke.color),
+                ("hyperlink", v.hyperlink_color),
+                ("cursor", v.text_cursor.stroke.color),
+                ("warn", v.warn_fg_color),
+                ("error", v.error_fg_color),
+            ];
+            for (n, c) in [
+                ("text", v.override_text_color),
+                ("weak_text", v.weak_text_color),
+                ("text_edit", v.text_edit_bg_color),
+            ] {
+                if let Some(c) = c {
+                    named.push((n, c));
+                }
+            }
+            for (n, w) in [
+                ("noninteractive", v.widgets.noninteractive),
+                ("inactive", v.widgets.inactive),
+                ("hovered", v.widgets.hovered),
+                ("active", v.widgets.active),
+                ("open", v.widgets.open),
+            ] {
+                named.push((n, w.bg_fill));
+                named.push((n, w.weak_bg_fill));
+                named.push((n, w.bg_stroke.color));
+                named.push((n, w.fg_stroke.color));
+            }
+            for (n, c) in named {
+                assert!(!is_neutral(c), "dark={dark} {n}: {c:?} è bianco o grigio");
+            }
+        }
+    }
+
+    #[test]
     fn no_pure_white_backgrounds() {
         for p in [LIGHT, DARK] {
             for col in [p.window_bg, p.sidebar, p.list_bg, p.stripe, p.toolbar] {
-                assert_ne!(col, Color32::WHITE);
-                assert!(col.r() < 0xF0 || col.g() < 0xF0 || col.b() < 0xF0);
+                assert!(!is_neutral(col), "{col:?} è bianco o grigio");
             }
         }
         assert_eq!(palette(true).window_bg, DARK.window_bg);

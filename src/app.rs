@@ -709,9 +709,9 @@ impl App {
             let w = &mut ui.style_mut().visuals.widgets;
             w.inactive.weak_bg_fill = Color32::TRANSPARENT;
             w.inactive.bg_stroke = egui::Stroke::NONE;
-            w.hovered.weak_bg_fill = Color32::from_white_alpha(35);
-            w.active.weak_bg_fill = Color32::from_white_alpha(55);
-            w.open.weak_bg_fill = Color32::from_white_alpha(55);
+            w.hovered.weak_bg_fill = Color32::from_rgba_unmultiplied(0xB6, 0xE4, 0xF7, 40);
+            w.active.weak_bg_fill = Color32::from_rgba_unmultiplied(0xB6, 0xE4, 0xF7, 60);
+            w.open.weak_bg_fill = Color32::from_rgba_unmultiplied(0xB6, 0xE4, 0xF7, 60);
             ui.menu_button(t("File"), |ui| {
                 if ui.button("Nuovo messaggio").clicked() {
                     self.new_mail();
@@ -1256,8 +1256,11 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, label: &str, p: &Palette, enabled:
         },
     );
     if enabled && resp.hovered() {
-        ui.painter()
-            .rect_filled(rect, 6.0, Color32::from_white_alpha(30));
+        ui.painter().rect_filled(
+            rect,
+            6.0,
+            Color32::from_rgba_unmultiplied(0xB6, 0xE4, 0xF7, 36),
+        );
     }
     let col = if enabled {
         p.toolbar_text
@@ -1288,11 +1291,11 @@ fn draw_envelope(painter: &egui::Painter, c: egui::Pos2, r: f32, color: Color32,
         painter.rect_filled(rect, 1.5, color);
         painter.line_segment(
             [rect.left_top(), c + egui::vec2(0.0, 1.0)],
-            egui::Stroke::new(1.2, Color32::from_black_alpha(90)),
+            egui::Stroke::new(1.2, Color32::from_rgba_unmultiplied(0x08, 0x3A, 0x57, 120)),
         );
         painter.line_segment(
             [rect.right_top(), c + egui::vec2(0.0, 1.0)],
-            egui::Stroke::new(1.2, Color32::from_black_alpha(90)),
+            egui::Stroke::new(1.2, Color32::from_rgba_unmultiplied(0x08, 0x3A, 0x57, 120)),
         );
     } else {
         painter.rect_stroke(rect, 1.5, st, egui::StrokeKind::Inside);
